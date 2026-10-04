@@ -35,12 +35,18 @@ def prepare_env(
         "POSTGRES_USER": "bot",
         "LOG_LEVEL": "INFO",
         "HEALTH_PORT": "8080",
+        "OPENAI_BASE_URL": "https://api.openai.com/v1",
+        "OPENAI_MODEL": "gpt-4.1-mini",
+        "OPENAI_TIMEOUT": "30",
+        "OPENAI_MAX_OUTPUT_TOKENS": "1200",
     }
     for key, default in defaults.items():
         if not values.get(key):
             updates[key] = default
     if not values.get("BOT_TOKEN"):
         updates["BOT_TOKEN"] = ask("Токен бота из BotFather (ввод скрыт): ").strip()
+    if not values.get("OPENAI_API_KEY"):
+        updates["OPENAI_API_KEY"] = ask("Ключ OpenAI API (ввод скрыт): ").strip()
     if not values.get("POSTGRES_PASSWORD"):
         updates["POSTGRES_PASSWORD"] = secrets.token_urlsafe(24)
     if "TELEGRAM_PROXY_URL" not in values or (cloud and not values.get("TELEGRAM_PROXY_URL")):
