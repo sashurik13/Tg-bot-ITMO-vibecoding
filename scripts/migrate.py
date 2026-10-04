@@ -11,8 +11,12 @@ import asyncpg
 from app.config import ConfigError, Settings
 
 
+def find_migration_files(migrations_dir: Path) -> list[Path]:
+    return sorted(migrations_dir.glob("[0-9][0-9][0-9]_*.sql"))
+
+
 async def migrate(settings: Settings, migrations_dir: Path) -> list[str]:
-    files = sorted(migrations_dir.glob("[0-9][0-9][0-9]_*.sql"))
+    files = await asyncio.to_thread(find_migration_files, migrations_dir)
     if not files:
         raise RuntimeError(f"Не найдены SQL-миграции в {migrations_dir}.")
 
