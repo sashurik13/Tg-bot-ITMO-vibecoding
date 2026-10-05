@@ -24,7 +24,9 @@ class OpenAILLMClient:
             timeout=settings.openai_timeout,
         )
 
-    async def generate(self, *, instructions: str, text: str, temperature: float = 0.3) -> str:
+    async def generate(
+        self, *, instructions: str, messages: list[dict[str, str]], temperature: float = 0.3
+    ) -> str:
         request_id = uuid.uuid4().hex[:12]
         started = time.monotonic()
         logger.info("Начат вызов LLM: request_id=%s model=%s", request_id, self.model)
@@ -32,7 +34,7 @@ class OpenAILLMClient:
             response = await self._client.responses.create(
                 model=self.model,
                 instructions=instructions,
-                input=[{"role": "user", "content": text}],
+                input=messages,
                 temperature=temperature,
                 max_output_tokens=self.max_output_tokens,
                 store=False,
