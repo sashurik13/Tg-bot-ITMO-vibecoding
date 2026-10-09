@@ -3,15 +3,34 @@ import time
 import uuid
 from typing import Any
 
-from openai import AsyncOpenAI, OpenAIError
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    AsyncOpenAI,
+    AuthenticationError,
+    OpenAIError,
+    PermissionDeniedError,
+)
 
 from app.config import Settings
 
 logger = logging.getLogger("app.llm")
 
+ERROR_MESSAGES = {
+    "timeout": "Модель не ответила вовремя. Попробуй ещё раз чуть позже.",
+    "authorization": "Сервис модели недоступен из-за ошибки доступа. Обратись к владельцу бота.",
+    "network": "Не удалось связаться с сервисом модели. Попробуй ещё раз чуть позже.",
+    "empty": "Модель вернула пустой ответ. Попробуй ещё раз чуть позже.",
+    "unavailable": "Не удалось получить ответ от языковой модели. Попробуй ещё раз чуть позже.",
+}
+
 
 class LLMError(RuntimeError):
     """Безопасная для обработчика ошибка внешней языковой модели."""
+
+    def __init__(self, message: str, *, kind: str = "unavailable"):
+        super().__init__(message)
+        self.user_message = ERROR_MESSAGES.get(kind, ERROR_MESSAGES["unavailable"])
 
 
 class OpenAILLMClient:
@@ -39,16 +58,27 @@ class OpenAILLMClient:
                 max_output_tokens=self.max_output_tokens,
                 store=False,
             )
-        except OpenAIError as exc:
-            logger.exception(
-                "Ошибка LLM: request_id=%s model=%s duration_ms=%d",
+        except (OpenAIError, TimeoutError, OSError) as exc:
+            if isinstance(exc, (APITimeoutError, TimeoutError)):
+                kind = "timeout"
+            elif isinstance(exc, (AuthenticationError, PermissionDeniedError)):
+                kind = "authorization"
+            elif isinstance(exc, (APIConnectionError, OSError)):
+                kind = "network"
+            else:
+                kind = "unavailable"
+            # Текст исключения и тело ответа API могут содержать секреты.
+            logger.warning(
+                "Ошибка LLM: request_id=%s kind=%s error_type=%s duration_ms=%d",
                 request_id,
-                self.model,
+                kind,
+                type(exc).__name__,
                 round((time.monotonic() - started) * 1000),
             )
-            raise LLMError("Сервис языковой модели временно недоступен.") from exc
+            raise LLMError("Ошибка запроса к модели.", kind=kind) from exc
 
-        answer = (response.output_text or "").strip()
+        output = response.output_text
+        answer = output.strip() if isinstance(output, str) else ""
         if not answer:
             logger.warning(
                 "Пустой ответ LLM: request_id=%s model=%s duration_ms=%d",
@@ -56,7 +86,7 @@ class OpenAILLMClient:
                 self.model,
                 round((time.monotonic() - started) * 1000),
             )
-            raise LLMError("Языковая модель вернула пустой ответ.")
+            raise LLMError("Языковая модель вернула пустой ответ.", kind="empty")
         logger.info(
             "Завершён вызов LLM: request_id=%s model=%s duration_ms=%d",
             request_id,

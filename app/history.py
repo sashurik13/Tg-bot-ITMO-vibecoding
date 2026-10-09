@@ -1,5 +1,30 @@
 import asyncpg
 
+HISTORY_LIMIT = 10
+HISTORY_CHAR_LIMIT = 12_000
+
+
+def limit_history(
+    messages: list[dict[str, str]],
+    *,
+    max_messages: int = HISTORY_LIMIT,
+    max_chars: int = HISTORY_CHAR_LIMIT,
+) -> list[dict[str, str]]:
+    """Оставляет последние реплики; самый новый запрос сохраняется целиком.
+
+    Объём оценивается по символам content. Системная инструкция передаётся
+    отдельно и не сокращается. Последний запрос может превышать max_chars.
+    """
+    if max_messages < 1 or max_chars < 1:
+        raise ValueError("Лимиты истории должны быть положительными.")
+    recent = messages[-max_messages:]
+    size = sum(len(message["content"]) for message in recent)
+    start = 0
+    while size > max_chars and start < len(recent) - 1:
+        size -= len(recent[start]["content"])
+        start += 1
+    return recent[start:]
+
 
 async def save_message(
     pool: asyncpg.Pool, *, telegram_user_id: int, role: str, content: str

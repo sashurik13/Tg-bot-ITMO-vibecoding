@@ -1,10 +1,22 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import httpx2
 import pytest
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    AuthenticationError,
+    InternalServerError,
+    OpenAIError,
+    PermissionDeniedError,
+    RateLimitError,
+)
 
 from app.config import ConfigError, Settings
 from app.handlers.study import answer_study, reset_history
+from app.history import HISTORY_CHAR_LIMIT, limit_history
 from app.llm import LLMError, OpenAILLMClient
 from app.prompts import STUDY_PROMPT
 
@@ -47,10 +59,11 @@ async def test_openai_client_sends_study_request_with_temperature():
     )
 
 
-async def test_openai_client_rejects_empty_response():
+@pytest.mark.parametrize("output", ["", "   ", None, 123])
+async def test_openai_client_rejects_empty_response(output):
     # Arrange
     api = Mock(
-        responses=Mock(create=AsyncMock(return_value=SimpleNamespace(output_text="   "))),
+        responses=Mock(create=AsyncMock(return_value=SimpleNamespace(output_text=output))),
         close=AsyncMock(),
     )
     llm = OpenAILLMClient(settings(), client=api)
@@ -59,6 +72,118 @@ async def test_openai_client_rejects_empty_response():
         await llm.generate(
             instructions=STUDY_PROMPT, messages=[{"role": "user", "content": "Вопрос"}]
         )
+
+
+def api_error(case):
+    request = httpx2.Request("POST", "https://provider.invalid/api")
+    if case == "timeout":
+        return APITimeoutError(request)
+    if case == "native_timeout":
+        return TimeoutError("secret-detail")
+    if case == "network":
+        return APIConnectionError(request=request, message="secret-detail")
+    if case == "native_network":
+        return OSError("secret-detail")
+    if case == "generic":
+        return OpenAIError("secret-detail")
+    errors = {
+        "authorization": (AuthenticationError, 401),
+        "forbidden": (PermissionDeniedError, 403),
+        "unavailable": (InternalServerError, 503),
+        "rate_limit": (RateLimitError, 429),
+    }
+    error_type, status = errors[case]
+    return error_type(
+        "secret-detail",
+        response=httpx2.Response(status, request=request),
+        body={"error": "secret-detail"},
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("timeout", "не ответила вовремя"),
+        ("native_timeout", "не ответила вовремя"),
+        ("authorization", "ошибки доступа"),
+        ("forbidden", "ошибки доступа"),
+        ("network", "Не удалось связаться"),
+        ("native_network", "Не удалось связаться"),
+        ("unavailable", "Не удалось получить ответ"),
+        ("rate_limit", "Не удалось получить ответ"),
+        ("generic", "Не удалось получить ответ"),
+    ],
+)
+async def test_api_errors_reach_user_safely_without_assistant_history(case, expected, caplog):
+    error = api_error(case)
+    api = Mock(responses=Mock(create=AsyncMock(side_effect=error)))
+    llm = OpenAILLMClient(settings(), client=api)
+    message = Mock(
+        text="Вопрос",
+        chat=SimpleNamespace(id=42),
+        bot=Mock(send_chat_action=AsyncMock()),
+        answer=AsyncMock(),
+    )
+    db = Mock(
+        execute=AsyncMock(), fetch=AsyncMock(return_value=[]), fetchval=AsyncMock(return_value=None)
+    )
+
+    await answer_study(message, llm, db)
+
+    sent = message.answer.await_args.args[0]
+    assert expected in sent
+    assert "secret-detail" not in sent + caplog.text
+    assert "Traceback" not in sent + caplog.text
+    assert db.execute.await_count == 2
+    assert db.execute.await_args.args[1:] == (42, "user", "Вопрос")
+
+
+@pytest.mark.parametrize("output", [None, "", " \n "])
+async def test_empty_model_answer_does_not_create_assistant_history(output):
+    api = Mock(responses=Mock(create=AsyncMock(return_value=SimpleNamespace(output_text=output))))
+    llm = OpenAILLMClient(settings(), client=api)
+    message = Mock(
+        text="Вопрос",
+        chat=SimpleNamespace(id=42),
+        bot=Mock(send_chat_action=AsyncMock()),
+        answer=AsyncMock(),
+    )
+    db = Mock(
+        execute=AsyncMock(), fetch=AsyncMock(return_value=[]), fetchval=AsyncMock(return_value=None)
+    )
+
+    await answer_study(message, llm, db)
+
+    assert "пустой ответ" in message.answer.await_args.args[0]
+    assert db.execute.await_count == 2
+
+
+async def test_llm_cancellation_is_not_converted_to_service_error():
+    api = Mock(responses=Mock(create=AsyncMock(side_effect=asyncio.CancelledError)))
+    llm = OpenAILLMClient(settings(), client=api)
+    with pytest.raises(asyncio.CancelledError):
+        await llm.generate(instructions=STUDY_PROMPT, messages=[])
+
+
+async def test_system_instruction_is_sent_in_full_outside_history_budget():
+    api = Mock(
+        responses=Mock(create=AsyncMock(return_value=SimpleNamespace(output_text="Ответ"))),
+        close=AsyncMock(),
+    )
+    llm = OpenAILLMClient(settings(), client=api)
+    instructions = STUDY_PROMPT + "а" * HISTORY_CHAR_LIMIT
+    history = limit_history(
+        [
+            {"role": "assistant", "content": "б" * HISTORY_CHAR_LIMIT},
+            {"role": "user", "content": "Вопрос"},
+        ]
+    )
+
+    await llm.generate(instructions=instructions, messages=history)
+
+    request = api.responses.create.await_args.kwargs
+    assert request["instructions"] == instructions
+    assert request["input"] == [{"role": "user", "content": "Вопрос"}]
 
 
 async def test_study_handler_returns_controlled_model_answer():
