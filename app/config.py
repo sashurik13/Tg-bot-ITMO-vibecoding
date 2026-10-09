@@ -1,5 +1,6 @@
 """Единственное место чтения и проверки настроек приложения."""
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -24,6 +25,8 @@ class Settings:
     openai_model: str = "gpt-4.1-mini"
     openai_timeout: float = 30.0
     openai_max_output_tokens: int = 1200
+    history_limit: int = 10
+    history_char_limit: int = 12_000
     postgres_host: str = "127.0.0.1"
     postgres_port: int = 5432
     postgres_db: str = "bot"
@@ -55,7 +58,7 @@ class Settings:
         def positive_float(key: str, default: str) -> float:
             try:
                 result = float(value(key, default))
-                if result <= 0:
+                if not math.isfinite(result) or result <= 0:
                     raise ValueError
                 return result
             except ValueError:
@@ -130,6 +133,8 @@ class Settings:
             openai_model=openai_model,
             openai_timeout=positive_float("OPENAI_TIMEOUT", "30"),
             openai_max_output_tokens=positive_int("OPENAI_MAX_OUTPUT_TOKENS", "1200"),
+            history_limit=positive_int("HISTORY_LIMIT", "10"),
+            history_char_limit=positive_int("HISTORY_CHAR_LIMIT", "12000"),
             postgres_host=value("POSTGRES_HOST", "127.0.0.1"),
             postgres_port=port("POSTGRES_PORT", "5432"),
             postgres_db=value("POSTGRES_DB", "bot"),

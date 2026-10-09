@@ -42,6 +42,7 @@ async def run(settings: Settings) -> None:
                 bot,
                 db=state.pool,
                 llm=llm,
+                config=settings,
                 allowed_updates=dispatcher.resolve_used_update_types(),
                 close_bot_session=False,
             )

@@ -30,6 +30,7 @@ async def migrate(settings: Settings, migrations_dir: Path) -> list[str]:
     )
     try:
         async with connection.transaction():
+            await connection.execute("SELECT pg_advisory_xact_lock(77101301)")
             await connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -44,7 +45,8 @@ async def migrate(settings: Settings, migrations_dir: Path) -> list[str]:
             for file in files:
                 if file.name in applied_versions:
                     continue
-                await connection.execute(file.read_text(encoding="utf-8"))
+                sql = await asyncio.to_thread(file.read_text, encoding="utf-8")
+                await connection.execute(sql)
                 await connection.execute(
                     "INSERT INTO schema_migrations (version) VALUES ($1)", file.name
                 )
@@ -62,8 +64,8 @@ def main() -> int:
     try:
         settings = Settings.load(args.env_file)
         applied = asyncio.run(migrate(settings, Path(args.migrations_dir)))
-    except (ConfigError, OSError, RuntimeError, asyncpg.PostgresError) as exc:
-        print(f"Миграция не выполнена: {exc}")
+    except (ConfigError, OSError, RuntimeError, asyncpg.PostgresError):
+        print("Миграция не выполнена. Проверьте подключение к БД и каталог SQL-миграций.")
         return 1
     if applied:
         print("Применены миграции: " + ", ".join(applied))

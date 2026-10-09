@@ -14,6 +14,7 @@ from dotenv import dotenv_values, set_key
 from app.config import ConfigError, Settings
 from app.db import create_pool
 from scripts.common import CommandError, private_write, run_command
+from scripts.migrate import migrate
 
 
 def prepare_env(
@@ -39,6 +40,8 @@ def prepare_env(
         "OPENAI_MODEL": "gpt-4.1-mini",
         "OPENAI_TIMEOUT": "30",
         "OPENAI_MAX_OUTPUT_TOKENS": "1200",
+        "HISTORY_LIMIT": "10",
+        "HISTORY_CHAR_LIMIT": "12000",
     }
     for key, default in defaults.items():
         if not values.get(key):
@@ -113,12 +116,15 @@ def local_main(root: Path, action: str, setup_only: bool) -> int:
         )
         try:
             asyncio.run(check_database(settings))
+            applied = asyncio.run(migrate(settings, root / "migrations"))
         except Exception:
             raise CommandError(
                 "БД не прошла SELECT 1. Проверьте адрес и пароль; изменение env-файла "
                 "не меняет пароль уже созданной роли PostgreSQL."
             ) from None
         print("Окружение готово, PostgreSQL отвечает на SELECT 1.", flush=True)
+        if applied:
+            print("Применены миграции: " + ", ".join(applied), flush=True)
         if setup_only:
             print("Выберите Python из .venv в IDE и запустите модуль app из корня проекта.")
             return 0

@@ -48,7 +48,7 @@ async def test_openai_client_sends_study_request_with_temperature():
         temperature=0.3,
     )
     # Assert
-    assert result == "Ответ"
+    assert result == "  Ответ  "
     api.responses.create.assert_awaited_once_with(
         model="gpt-4.1-mini",
         instructions=STUDY_PROMPT,
@@ -258,3 +258,76 @@ def test_openai_settings_are_required_and_secret_is_hidden(tmp_path):
     )
     assert loaded.openai_model == "gpt-4.1-mini"
     assert "top-secret" not in repr(loaded)
+
+
+@pytest.mark.parametrize("status", ["incomplete", "failed", "cancelled", "queued", "in_progress"])
+async def test_unfinished_status_never_delivers_or_saves_assistant(status):
+    api = Mock(
+        responses=Mock(
+            create=AsyncMock(
+                return_value=SimpleNamespace(
+                    status=status,
+                    output_text="Частичный ответ",
+                    error=None,
+                    incomplete_details=None,
+                )
+            )
+        )
+    )
+    llm = OpenAILLMClient(settings(), client=api)
+    message = Mock(
+        text="Вопрос",
+        chat=SimpleNamespace(id=42),
+        bot=Mock(send_chat_action=AsyncMock()),
+        answer=AsyncMock(),
+    )
+    db = Mock(
+        execute=AsyncMock(), fetch=AsyncMock(return_value=[]), fetchval=AsyncMock(return_value=None)
+    )
+    await answer_study(message, llm, db)
+    assert db.execute.await_count == 2
+    assert "Частичный ответ" not in message.answer.await_args.args[0]
+    assert (
+        message.answer.await_args.args[0]
+        == LLMError(
+            "unused", kind="incomplete" if status == "incomplete" else "unavailable"
+        ).user_message
+    )
+
+
+async def test_result_exposes_actual_model_usage_and_preserves_formatting():
+    api = Mock(
+        responses=Mock(
+            create=AsyncMock(
+                return_value=SimpleNamespace(
+                    status="completed",
+                    error=None,
+                    incomplete_details=None,
+                    output_text="\n  Перевод\n",
+                    model="fixed-model",
+                    usage=SimpleNamespace(input_tokens=10, output_tokens=20),
+                )
+            )
+        )
+    )
+    result = await OpenAILLMClient(settings(), client=api).generate_result(
+        instructions="test", messages=[]
+    )
+    assert (result.text, result.model, result.input_tokens, result.output_tokens) == (
+        "\n  Перевод\n",
+        "fixed-model",
+        10,
+        20,
+    )
+
+
+@pytest.mark.parametrize("field", ["error", "incomplete_details"])
+async def test_response_error_metadata_is_not_accepted_as_success(field, caplog):
+    response = SimpleNamespace(
+        output_text="Частичный ответ", status="completed", error=None, incomplete_details=None
+    )
+    setattr(response, field, SimpleNamespace(message="secret-detail"))
+    api = Mock(responses=Mock(create=AsyncMock(return_value=response)))
+    with pytest.raises(LLMError):
+        await OpenAILLMClient(settings(), client=api).generate(instructions="test", messages=[])
+    assert "secret-detail" not in caplog.text

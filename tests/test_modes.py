@@ -1,16 +1,20 @@
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import asyncpg
 import pytest
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.exceptions import TelegramNetworkError
 from aiogram.methods import SendChatAction, SendMessage
 from aiogram.types import Chat, Message, MessageEntity, Update, User
 
+from app.config import Settings
 from app.handlers.study import router
 from app.history import HISTORY_CHAR_LIMIT
 from app.llm import LLMError
+from app.middleware import DATABASE_ERROR_MESSAGE, ConversationMiddleware
 from app.prompts import PLAN_PROMPT, STUDY_PROMPT, TRANSLATE_PROMPT
 from app.telegram import DELIVERY_ERROR_MESSAGE, TELEGRAM_TEXT_LIMIT
 from app.user_settings import get_mode, get_temperature, set_mode
@@ -51,12 +55,15 @@ def bot_app():
     )
     db.acquire.return_value.__aenter__.return_value = db
     db.transaction.return_value.__aenter__.return_value = db
-    llm = MagicMock(generate=AsyncMock(return_value="Ответ"))
+    llm = MagicMock(model="test-model", generate=AsyncMock(return_value="Ответ"))
+    config = Settings(bot_token=TOKEN, postgres_password="unused")
     bot = Bot(TOKEN)
     bot.session = AsyncMock()
     dispatcher = Dispatcher()
     test_router = Router()
     test_router.message.filter(F.chat.type == "private")
+    middleware = ConversationMiddleware()
+    test_router.message.middleware(middleware)
     for handler in router.message.handlers:
         test_router.message.register(handler.callback, *(item.callback for item in handler.filters))
     dispatcher.include_router(test_router)
@@ -73,9 +80,11 @@ def bot_app():
             text=text,
             entities=entities,
         )
-        await dispatcher.feed_update(bot, Update(update_id=1, message=message), db=db, llm=llm)
+        await dispatcher.feed_update(
+            bot, Update(update_id=1, message=message), db=db, llm=llm, config=app.config
+        )
 
-    return SimpleNamespace(
+    app = SimpleNamespace(
         send=send,
         bot=bot,
         db=db,
@@ -83,7 +92,10 @@ def bot_app():
         modes=modes,
         histories=histories,
         temperatures=temperatures,
+        config=config,
+        middleware=middleware,
     )
+    return app
 
 
 @pytest.mark.parametrize("mode", ["study", "translate", "plan"])
@@ -95,6 +107,15 @@ async def test_command_persists_mode_without_calling_model(bot_app, mode):
     bot_app.llm.generate.assert_not_awaited()
     assert bot_app.histories == {}
     assert isinstance(bot_app.bot.session.call_args.args[1], SendMessage)
+    expected = {
+        "study": "Режим обучения активен. Пришли вопрос по программированию.",
+        "translate": "Режим перевода активен. На какой язык перевести текст? "
+        "Пришли язык и текст следующим сообщением, например: «На английский: Привет!».",
+        "plan": "Режим планирования активен. Какие учебные задачи и дедлайны нужно учесть? "
+        "Укажи, сколько времени доступно для занятий. Я помогу составить план; "
+        "автоматические уведомления не отправляются.",
+    }
+    assert bot_app.bot.session.call_args.args[1].text == expected[mode]
 
 
 @pytest.mark.parametrize(
@@ -136,7 +157,9 @@ async def test_unknown_saved_mode_requests_selection_without_model(bot_app):
     bot_app.modes[42] = "unknown"
     await bot_app.send("Вопрос")
 
-    assert "неизвестный режим" in bot_app.bot.session.call_args.args[1].text
+    assert bot_app.bot.session.call_args.args[1].text == (
+        "Сохранён неизвестный режим. Выбери /study, /translate или /plan."
+    )
     bot_app.llm.generate.assert_not_awaited()
     assert bot_app.histories == {}
 
@@ -152,7 +175,10 @@ async def test_unknown_command_preserves_selection(bot_app):
     await bot_app.send("/unknown")
 
     assert bot_app.modes[42] == "plan"
-    assert "Неизвестная команда" in bot_app.bot.session.call_args.args[1].text
+    assert bot_app.bot.session.call_args.args[1].text == (
+        "Неизвестная команда. Выбери /study, /translate или /plan; /reset очищает историю, "
+        "/settings показывает режим, модель и temperature."
+    )
     bot_app.llm.generate.assert_not_awaited()
     assert bot_app.histories == {}
 
@@ -225,8 +251,11 @@ async def test_new_user_defaults_to_study(bot_app):
 async def test_settings_shows_default_without_writing_or_calling_model(bot_app):
     await bot_app.send("/settings")
     reply = bot_app.bot.session.call_args.args[1].text
-    assert "Текущая temperature: 0.3" in reply
-    assert "0.0, 0.3, 0.7, 1.0" in reply
+    assert reply == (
+        "Текущий режим: /study.\nМодель: test-model.\nТекущая temperature: 0.3.\n"
+        "Допустимые значения: 0.0, 0.3, 0.7, 1.0.\n"
+        "Для изменения отправь, например: /settings 0.7"
+    )
     bot_app.db.execute.assert_not_awaited()
     bot_app.llm.generate.assert_not_awaited()
     assert bot_app.histories == {}
@@ -249,7 +278,10 @@ async def test_invalid_settings_preserves_previous_temperature(bot_app, value):
     await bot_app.send("/settings 0.7")
     bot_app.db.execute.reset_mock()
     await bot_app.send(f"/settings {value}")
-    assert "Настройка не изменена" in bot_app.bot.session.call_args.args[1].text
+    assert bot_app.bot.session.call_args.args[1].text == (
+        "Допустимые значения: 0.0, 0.3, 0.7, 1.0. Используй, например: /settings 0.7. "
+        "Настройка не изменена."
+    )
     bot_app.db.execute.assert_not_awaited()
     bot_app.llm.generate.assert_not_awaited()
     assert await get_temperature(bot_app.db, telegram_user_id=42) == 0.7
@@ -403,3 +435,129 @@ async def test_telegram_error_on_command_does_not_break_dispatcher(bot_app):
     await bot_app.send("/study")
     assert bot_app.modes[42] == "study"
     bot_app.llm.generate.assert_not_awaited()
+
+
+@pytest.mark.parametrize("mode", ["study", "translate", "plan"])
+async def test_mode_selection_clears_only_own_history_and_keeps_temperature(bot_app, mode):
+    # Arrange
+    await bot_app.send("Первый вопрос", user_id=42)
+    await bot_app.send("Чужой вопрос", user_id=43)
+    await bot_app.send("/settings 0.7", user_id=42)
+    other_history = bot_app.histories[43].copy()
+    # Act
+    await bot_app.send(f"/{mode}", user_id=42)
+    await bot_app.send("Новая задача", user_id=42)
+    # Assert
+    assert bot_app.modes[42] == mode
+    assert bot_app.temperatures[42] == 0.7
+    assert bot_app.histories[43] == other_history
+    assert bot_app.llm.generate.await_args.kwargs["messages"] == [
+        {"role": "user", "content": "Новая задача"}
+    ]
+
+
+async def test_reset_isolates_two_existing_histories(bot_app):
+    await bot_app.send("Вопрос", user_id=42)
+    await bot_app.send("Другой вопрос", user_id=43)
+    other = bot_app.histories[43].copy()
+    await bot_app.send("/reset", user_id=42)
+    assert bot_app.histories.get(42, []) == []
+    assert bot_app.histories[43] == other
+    assert bot_app.bot.session.call_args.args[1].text == "История диалога очищена."
+
+
+async def test_configured_limits_are_used_before_llm(bot_app):
+    from dataclasses import replace
+
+    bot_app.config = replace(bot_app.config, history_limit=3, history_char_limit=15)
+    bot_app.histories[42] = [{"role": "user", "content": "старое"}] * 4
+    await bot_app.send("новое")
+    assert bot_app.db.fetch.await_args.args[1:] == (42, 3)
+    assert bot_app.llm.generate.await_args.kwargs["messages"] == [
+        {"role": "user", "content": "старое"},
+        {"role": "user", "content": "новое"},
+    ]
+
+
+async def test_oversized_question_is_rejected_without_storage_or_api(bot_app):
+    from dataclasses import replace
+
+    from app.handlers.study import answer_study
+
+    config = replace(bot_app.config, history_char_limit=5)
+    message = MagicMock(text="123456", chat=SimpleNamespace(id=42), answer=AsyncMock())
+    await answer_study(message, bot_app.llm, bot_app.db, config)
+    message.answer.assert_awaited_once_with(
+        "Запрос слишком длинный: допустимо до 5 символов. "
+        "Сократи его или раздели на несколько вопросов.",
+        parse_mode=None,
+    )
+    bot_app.db.execute.assert_not_awaited()
+    bot_app.llm.generate.assert_not_awaited()
+
+
+async def test_reset_waits_for_inflight_generation_then_clears_history(bot_app):
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def generate(**kwargs):
+        started.set()
+        await release.wait()
+        return "Ответ"
+
+    bot_app.llm.generate.side_effect = generate
+    question = asyncio.create_task(bot_app.send("Вопрос"))
+    await started.wait()
+    reset = asyncio.create_task(bot_app.send("/reset"))
+    try:
+        await asyncio.sleep(0)
+        assert not reset.done()
+        release.set()
+        await asyncio.gather(question, reset)
+        assert bot_app.histories.get(42, []) == []
+        assert bot_app.middleware.locks == {}
+    finally:
+        release.set()
+        await asyncio.gather(question, reset, return_exceptions=True)
+
+
+async def test_database_error_is_safe_and_next_request_can_succeed(bot_app, caplog):
+    bot_app.db.fetchval.side_effect = asyncpg.PostgresError("secret-dialog-and-password")
+    await bot_app.send("Вопрос")
+    assert bot_app.bot.session.call_args.args[1].text == DATABASE_ERROR_MESSAGE
+    assert "secret-dialog-and-password" not in caplog.text
+    assert bot_app.middleware.locks == {}
+    bot_app.db.fetchval.side_effect = None
+    bot_app.db.fetchval.return_value = None
+    await bot_app.send("/study")
+    assert bot_app.modes[42] == "study"
+
+
+async def test_requests_are_ordered_per_user_without_blocking_other_users(bot_app):
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def generate(**kwargs):
+        if kwargs["messages"][-1]["content"] == "Первый":
+            started.set()
+            await release.wait()
+        return "Ответ"
+
+    bot_app.llm.generate.side_effect = generate
+    first = asyncio.create_task(bot_app.send("Первый", user_id=42))
+    await started.wait()
+    second = asyncio.create_task(bot_app.send("Второй", user_id=42))
+    try:
+        await bot_app.send("Независимый", user_id=43)
+        assert bot_app.histories[43][-1] == {"role": "assistant", "content": "Ответ"}
+        assert not second.done()
+        release.set()
+        await asyncio.gather(first, second)
+        assert bot_app.histories[42] == [
+            {"role": "user", "content": "Первый"},
+            {"role": "assistant", "content": "Ответ"},
+            {"role": "user", "content": "Второй"},
+            {"role": "assistant", "content": "Ответ"},
+        ]
+        assert bot_app.middleware.locks == {}
+    finally:
+        release.set()
+        await asyncio.gather(first, second, return_exceptions=True)

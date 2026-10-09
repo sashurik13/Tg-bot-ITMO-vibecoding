@@ -405,9 +405,12 @@ def test_setup_only_checks_real_credentials_without_starting_bot(tmp_path, monke
     launch = Mock()
     monkeypatch.setattr(local, "run_command", commands)
     monkeypatch.setattr(local, "check_database", database)
+    migration = AsyncMock(return_value=["001_initial.sql"])
+    monkeypatch.setattr(local, "migrate", migration)
     monkeypatch.setattr(local.subprocess, "call", launch)
     # Act
     result = local.local_main(tmp_path, "up", setup_only=True)
+    migration.assert_awaited_once()
     # Assert
     assert result == 0
     assert "--wait" in commands.call_args.args[0]

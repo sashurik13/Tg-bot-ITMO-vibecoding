@@ -62,3 +62,6 @@ async def set_mode(pool: asyncpg.Pool, *, telegram_user_id: int, mode: str) -> N
             telegram_user_id,
             mode,
         )
+        await connection.execute(
+            "DELETE FROM conversation_messages WHERE telegram_user_id = $1", telegram_user_id
+        )

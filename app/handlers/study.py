@@ -3,14 +3,15 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import Message
 
+from app.config import Settings
 from app.history import (
-    HISTORY_LIMIT,
     clear_history,
     get_recent_messages,
     limit_history,
     save_message,
 )
 from app.llm import LLMError, OpenAILLMClient
+from app.middleware import ConversationMiddleware
 from app.prompts import MODE_PROMPTS
 from app.telegram import send_text, send_typing
 from app.user_settings import (
@@ -23,6 +24,7 @@ from app.user_settings import (
 
 router = Router(name="study")
 router.message.filter(F.chat.type == "private")
+router.message.middleware(ConversationMiddleware())
 
 
 @router.message(CommandStart())
@@ -32,7 +34,7 @@ async def start(message: Message) -> None:
         "Привет! Я учебный AI-ассистент по программированию. "
         "Пришли вопрос — я постараюсь объяснить его по шагам.\n\n"
         "Режимы: /study — обучение, /translate — перевод, /plan — учебный план.\n"
-        "/settings — настройки temperature.\n"
+        "/settings — режим, модель и temperature.\n"
         "/reset — очистить историю. Команда выбирает режим; запрос пришли следующим сообщением.",
     )
 
@@ -65,12 +67,16 @@ async def select_plan(message: Message, db: asyncpg.Pool) -> None:
 
 
 @router.message(Command("settings"))
-async def settings(message: Message, db: asyncpg.Pool, command: CommandObject) -> None:
+async def settings(
+    message: Message, db: asyncpg.Pool, command: CommandObject, llm: OpenAILLMClient
+) -> None:
     options = ", ".join(str(value) for value in ALLOWED_TEMPERATURES)
     if command.args is None or not command.args.strip():
         temperature = await get_temperature(db, telegram_user_id=message.chat.id)
+        mode = await get_mode(db, telegram_user_id=message.chat.id)
         await send_text(
             message,
+            f"Текущий режим: /{mode}.\nМодель: {llm.model}.\n"
             f"Текущая temperature: {temperature:.1f}.\n"
             f"Допустимые значения: {options}.\n"
             "Для изменения отправь, например: /settings 0.7",
@@ -95,7 +101,21 @@ async def reset_history(message: Message, db: asyncpg.Pool) -> None:
 
 
 @router.message(F.chat.type == "private", F.text, ~F.text.startswith("/"))
-async def answer_study(message: Message, llm: OpenAILLMClient, db: asyncpg.Pool) -> None:
+async def answer_study(
+    message: Message, llm: OpenAILLMClient, db: asyncpg.Pool, config: Settings | None = None
+) -> None:
+    max_messages = config.history_limit if config else 10
+    max_chars = config.history_char_limit if config else 12_000
+    if not message.text or not message.text.strip():
+        await send_text(message, "Пришли непустой текст вопроса.")
+        return
+    if len(message.text) > max_chars:
+        await send_text(
+            message,
+            f"Запрос слишком длинный: допустимо до {max_chars} символов. "
+            "Сократи его или раздели на несколько вопросов.",
+        )
+        return
     mode = await get_mode(db, telegram_user_id=message.chat.id)
     instructions = MODE_PROMPTS.get(mode)
     if instructions is None:
@@ -103,8 +123,8 @@ async def answer_study(message: Message, llm: OpenAILLMClient, db: asyncpg.Pool)
         return
     temperature = await get_temperature(db, telegram_user_id=message.chat.id)
     await save_message(db, telegram_user_id=message.chat.id, role="user", content=message.text)
-    history = await get_recent_messages(db, telegram_user_id=message.chat.id, limit=HISTORY_LIMIT)
-    history = limit_history(history)
+    history = await get_recent_messages(db, telegram_user_id=message.chat.id, limit=max_messages)
+    history = limit_history(history, max_messages=max_messages, max_chars=max_chars)
     await send_typing(message)
     try:
         answer = await llm.generate(
@@ -125,5 +145,5 @@ async def unknown_command(message: Message) -> None:
     await send_text(
         message,
         "Неизвестная команда. Выбери /study, /translate или /plan; /reset очищает историю, "
-        "/settings показывает настройки temperature.",
+        "/settings показывает режим, модель и temperature.",
     )
