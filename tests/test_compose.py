@@ -19,13 +19,16 @@ def test_local_and_cloud_compose_ports_credentials_and_healthchecks(tmp_path):
     password = "p$a#s's\\\\tail"
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "BOT_TOKEN=test\nPOSTGRES_PORT=55432\nPOSTGRES_PASSWORD=" + compose_quote(password) + "\n",
+        "BOT_TOKEN=test\nOPENAI_API_KEY=test-key\nOPENAI_MODEL=fixed-model\n"
+        "HISTORY_LIMIT=8\nHISTORY_CHAR_LIMIT=9000\nPOSTGRES_PORT=55432\nPOSTGRES_PASSWORD="
+        + compose_quote(password)
+        + "\n",
         encoding="utf-8",
     )
     environ = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith(("POSTGRES_", "BOT_TOKEN", "COMPOSE_"))
+        if not key.startswith(("POSTGRES_", "BOT_TOKEN", "COMPOSE_", "OPENAI_", "HISTORY_"))
     }
     command = compose_command(root)
     command[command.index("--env-file") + 1] = str(env_file)
@@ -67,3 +70,8 @@ def test_local_and_cloud_compose_ports_credentials_and_healthchecks(tmp_path):
     assert "app.healthcheck" in cloud["bot"]["healthcheck"]["test"]
     assert cloud["bot"]["healthcheck"]["timeout"] == "20s"
     assert cloud["bot"]["depends_on"]["db"]["condition"] == "service_healthy"
+    assert cloud["bot"]["environment"]["OPENAI_API_KEY"] == "test-key"
+    assert cloud["bot"]["environment"]["OPENAI_MODEL"] == "fixed-model"
+    assert cloud["bot"]["environment"]["HISTORY_LIMIT"] == "8"
+    assert cloud["bot"]["environment"]["HISTORY_CHAR_LIMIT"] == "9000"
+    assert "scripts.migrate" in " ".join(cloud["bot"]["command"])
