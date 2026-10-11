@@ -23,7 +23,6 @@ async def run(settings: Settings) -> None:
     try:
         state.pool = await create_pool(settings)
         logger.info("PostgreSQL подключён: SELECT 1 выполнен.")
-        # Начальная проверка токена и маршрута через прокси ограничена по времени.
         async with asyncio.timeout(30):
             me = await bot.get_me()
             webhook = await bot.get_webhook_info()
@@ -34,14 +33,17 @@ async def run(settings: Settings) -> None:
             )
         logger.info("Telegram доступен. Бот @%s запускает polling.", me.username)
         llm = OpenAILLMClient(settings)
+
         dispatcher = Dispatcher()
         dispatcher.include_router(router)
+
         runner = await start_health_server(state, settings.health_port)
         state.polling_task = asyncio.create_task(
             dispatcher.start_polling(
                 bot,
                 db=state.pool,
                 llm=llm,
+                config=settings,
                 allowed_updates=dispatcher.resolve_used_update_types(),
                 close_bot_session=False,
             )

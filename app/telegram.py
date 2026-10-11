@@ -16,7 +16,6 @@ TELEGRAM_ERRORS = (TelegramAPIError, ClientDecodeError, TimeoutError, OSError)
 
 
 def split_text(text: str) -> list[str]:
-    """Делит текст без потерь; символы вне BMP учитываются как две единицы UTF-16."""
     chunks = []
     start = size = 0
     for index, char in enumerate(text):
@@ -31,7 +30,6 @@ def split_text(text: str) -> list[str]:
 
 
 async def send_text(message: Message, text: str) -> bool:
-    """Отправляет части по очереди; ошибка доставки не выходит из обработчика."""
     try:
         for chunk in split_text(text):
             await message.answer(chunk, parse_mode=None)

@@ -1,6 +1,3 @@
--- Базовая схема для персональных диалогов Telegram-бота.
--- Файл безопасно запускать повторно: все объекты создаются только при отсутствии.
-
 CREATE TABLE IF NOT EXISTS telegram_users (
     telegram_user_id BIGINT PRIMARY KEY,
     username TEXT,

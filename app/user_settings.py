@@ -1,5 +1,3 @@
-"""Сохранение режима и temperature в настройках пользователя PostgreSQL."""
-
 import asyncpg
 
 from app.prompts import MODE_PROMPTS
@@ -9,7 +7,6 @@ DEFAULT_TEMPERATURE = 0.3
 
 
 async def get_temperature(pool: asyncpg.Pool, *, telegram_user_id: int) -> float:
-    # REAL возвращаем через текст, чтобы 0.3 не превратилось в 0.30000001192092896.
     value = await pool.fetchval(
         "SELECT temperature::text FROM user_settings WHERE telegram_user_id = $1", telegram_user_id
     )
@@ -61,4 +58,7 @@ async def set_mode(pool: asyncpg.Pool, *, telegram_user_id: int, mode: str) -> N
             """,
             telegram_user_id,
             mode,
+        )
+        await connection.execute(
+            "DELETE FROM conversation_messages WHERE telegram_user_id = $1", telegram_user_id
         )

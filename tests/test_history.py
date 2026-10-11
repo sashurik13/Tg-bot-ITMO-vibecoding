@@ -4,6 +4,7 @@ import pytest
 
 from app.history import (
     HISTORY_CHAR_LIMIT,
+    ContextTooLongError,
     clear_history,
     get_recent_messages,
     limit_history,
@@ -93,16 +94,27 @@ def test_message_count_and_character_budget_apply_together():
     assert sum(len(item["content"]) for item in result) == HISTORY_CHAR_LIMIT
 
 
-def test_oversized_current_request_is_preserved_in_full():
+def test_oversized_current_request_is_rejected_without_truncation():
     messages = [
         {"role": "assistant", "content": "Старый ответ"},
         {"role": "user", "content": "я" * (HISTORY_CHAR_LIMIT + 1)},
     ]
-    assert limit_history(messages) == messages[-1:]
+    with pytest.raises(ContextTooLongError):
+        limit_history(messages)
+    assert len(messages[-1]["content"]) == HISTORY_CHAR_LIMIT + 1
 
 
 def test_empty_history():
     assert limit_history([]) == []
+
+
+def test_trimming_does_not_leave_an_orphan_assistant_at_start():
+    messages = [
+        {"role": "user", "content": "старый вопрос"},
+        {"role": "assistant", "content": "старый ответ"},
+        {"role": "user", "content": "новый вопрос"},
+    ]
+    assert limit_history(messages, max_messages=2) == messages[-1:]
 
 
 @pytest.mark.parametrize(("count", "chars"), [(0, 100), (10, 0)])

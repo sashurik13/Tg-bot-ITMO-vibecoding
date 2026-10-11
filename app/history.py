@@ -4,24 +4,27 @@ HISTORY_LIMIT = 10
 HISTORY_CHAR_LIMIT = 12_000
 
 
+class ContextTooLongError(ValueError):
+    pass
+
+
 def limit_history(
     messages: list[dict[str, str]],
     *,
     max_messages: int = HISTORY_LIMIT,
     max_chars: int = HISTORY_CHAR_LIMIT,
 ) -> list[dict[str, str]]:
-    """Оставляет последние реплики; самый новый запрос сохраняется целиком.
-
-    Объём оценивается по символам content. Системная инструкция передаётся
-    отдельно и не сокращается. Последний запрос может превышать max_chars.
-    """
     if max_messages < 1 or max_chars < 1:
         raise ValueError("Лимиты истории должны быть положительными.")
     recent = messages[-max_messages:]
+    if recent and len(recent[-1]["content"]) > max_chars:
+        raise ContextTooLongError("Текущий запрос превышает бюджет истории.")
     size = sum(len(message["content"]) for message in recent)
     start = 0
     while size > max_chars and start < len(recent) - 1:
         size -= len(recent[start]["content"])
+        start += 1
+    while start < len(recent) - 1 and recent[start]["role"] == "assistant":
         start += 1
     return recent[start:]
 
