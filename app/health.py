@@ -18,7 +18,6 @@ async def health_result(state: HealthState) -> tuple[int, dict[str, str]]:
         try:
             database_ok = await state.pool.fetchval("SELECT 1", timeout=3) == 1
         except Exception:
-            # Не возвращаем клиенту исключения драйвера и параметры подключения.
             pass
     polling_ok = state.polling_task is not None and not state.polling_task.done()
     ready = state.initialized and polling_ok and database_ok
@@ -39,7 +38,6 @@ async def start_health_server(state: HealthState, port: int) -> web.AppRunner:
     runner = web.AppRunner(app)
     await runner.setup()
     try:
-        # Docker HEALTHCHECK выполняется внутри контейнера, внешний порт не нужен.
         await web.TCPSite(runner, "127.0.0.1", port).start()
     except BaseException:
         await runner.cleanup()

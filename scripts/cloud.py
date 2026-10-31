@@ -81,6 +81,9 @@ def source_archive(root: Path) -> Path:
         ]
     ]
     candidates.extend((root / "app").rglob("*.py"))
+    candidates.extend((root / "scripts").rglob("*.py"))
+    candidates.extend((root / "migrations").glob("[0-9][0-9][0-9]_*.sql"))
+    candidates.append(root / "data" / "schedule.json")
     with tarfile.open(archive_path, "w:gz") as archive:
         for path in sorted(candidates):
             if path.is_file() and "__pycache__" not in path.parts and not path.is_symlink():
