@@ -68,7 +68,7 @@ def database():
     try:
         docker(
             "run",
-            "--pull=never",
+            "--pull=missing",
             "-d",
             "--name",
             name,
