@@ -11,6 +11,19 @@ class SecretFilter(logging.Filter):
         self.secrets = sorted({s for s in secrets if s}, key=len, reverse=True)
 
     def filter(self, record: logging.LogRecord) -> bool:
+        # SDK debug/error records may contain entire requests, responses or capabilities.
+        # Boundary adapters emit controlled app.* events instead.
+        if record.name.split(".")[0] in {
+            "openai",
+            "httpx",
+            "httpx2",
+            "httpcore",
+            "mcp",
+            "aiohttp",
+            "asyncpg",
+            "aiogram",
+        }:
+            return False
         text = record.getMessage()
         if record.exc_info:
             text += "\n" + logging.Formatter().formatException(record.exc_info)
@@ -32,6 +45,7 @@ def configure_logging(settings: Settings) -> None:
             [
                 settings.bot_token,
                 settings.postgres_password,
+                settings.openai_api_key,
                 settings.telegram_proxy_url,
                 proxy.password or "",
                 unquote(proxy.password or ""),

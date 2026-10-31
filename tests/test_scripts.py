@@ -12,7 +12,9 @@ def test_first_setup_and_repeat_preserve_secrets(tmp_path):
     # Arrange
     root = tmp_path / "Курс с пробелами"
     root.mkdir()
-    prompt = Mock(side_effect=["123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijk", ""])
+    prompt = Mock(
+        side_effect=["123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijk", "test-openai-key", ""]
+    )
     # Act
     path = prepare_env(root, cloud=False, ask=prompt, environ={})
     first = path.read_bytes()
@@ -26,12 +28,17 @@ def test_first_setup_and_repeat_preserve_secrets(tmp_path):
 def test_cloud_requires_proxy_and_has_separate_password(tmp_path):
     # Arrange
     token = "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijk"
-    prepare_env(tmp_path, cloud=False, ask=Mock(side_effect=[token, ""]), environ={})
+    prepare_env(
+        tmp_path,
+        cloud=False,
+        ask=Mock(side_effect=[token, "test-openai-key", ""]),
+        environ={},
+    )
     # Act
     path = prepare_env(
         tmp_path,
         cloud=True,
-        ask=Mock(side_effect=[token, "socks5://user:p%40ss@proxy:1080"]),
+        ask=Mock(side_effect=[token, "test-openai-key", "socks5://user:p%40ss@proxy:1080"]),
         environ={},
     )
     # Assert
@@ -47,7 +54,13 @@ def test_cloud_empty_proxy_fails_before_creating_file(tmp_path):
         prepare_env(
             tmp_path,
             cloud=True,
-            ask=Mock(side_effect=["123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijk", ""]),
+            ask=Mock(
+                side_effect=[
+                    "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijk",
+                    "test-openai-key",
+                    "",
+                ]
+            ),
             environ={},
         )
     assert not (tmp_path / ".env.cloud").exists()
@@ -257,12 +270,17 @@ def test_deploy_archive_never_contains_env_or_keys(tmp_path):
     (tmp_path / ".env.cloud").write_text("SECRET=yes", encoding="utf-8")
     (tmp_path / ".deploy").mkdir()
     (tmp_path / ".deploy" / "id_ed25519").write_text("PRIVATE", encoding="utf-8")
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "schedule.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "data" / "private.json").write_text("PRIVATE", encoding="utf-8")
     # Act
     path = source_archive(tmp_path)
     with tarfile.open(path) as archive:
         names = archive.getnames()
     # Assert
     assert "app/__init__.py" in names
+    assert "data/schedule.json" in names
+    assert "data/private.json" not in names
     assert all(".env" not in n and "id_ed25519" not in n for n in names)
 
 
@@ -382,7 +400,9 @@ def test_setup_only_checks_real_credentials_without_starting_bot(tmp_path, monke
     prepare_env(
         tmp_path,
         cloud=False,
-        ask=Mock(side_effect=["123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijk", ""]),
+        ask=Mock(
+            side_effect=["123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijk", "test-openai-key", ""]
+        ),
         environ={},
     )
     commands = Mock(return_value="")
@@ -390,9 +410,12 @@ def test_setup_only_checks_real_credentials_without_starting_bot(tmp_path, monke
     launch = Mock()
     monkeypatch.setattr(local, "run_command", commands)
     monkeypatch.setattr(local, "check_database", database)
+    migration = AsyncMock(return_value=["001_initial.sql"])
+    monkeypatch.setattr(local, "migrate", migration)
     monkeypatch.setattr(local.subprocess, "call", launch)
     # Act
     result = local.local_main(tmp_path, "up", setup_only=True)
+    migration.assert_awaited_once()
     # Assert
     assert result == 0
     assert "--wait" in commands.call_args.args[0]

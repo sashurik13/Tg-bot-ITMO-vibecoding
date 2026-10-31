@@ -1,0 +1,264 @@
+import logging
+import re
+import time
+import uuid
+from dataclasses import dataclass
+from typing import Any
+
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    AsyncOpenAI,
+    AuthenticationError,
+    BadRequestError,
+    OpenAIError,
+    PermissionDeniedError,
+)
+
+from app.config import Settings
+
+logger = logging.getLogger("app.llm")
+
+ERROR_MESSAGES = {
+    "timeout": "Модель не ответила вовремя. Попробуй ещё раз чуть позже.",
+    "authorization": "Сервис модели недоступен из-за ошибки доступа. Обратись к владельцу бота.",
+    "network": "Не удалось связаться с сервисом модели. Попробуй ещё раз чуть позже.",
+    "empty": "Модель вернула пустой ответ. Попробуй ещё раз чуть позже.",
+    "unavailable": "Не удалось получить ответ от языковой модели. Попробуй ещё раз чуть позже.",
+    "incomplete": "Модель не завершила ответ. Попробуй сократить запрос или повторить его позже.",
+    "incompatible": (
+        "Текущая модель или провайдер не поддерживает обязательный формат ответа агента. "
+        "Выбери совместимую модель или измени настройки провайдера."
+    ),
+}
+
+_SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:/-]{1,100}$")
+
+
+@dataclass(frozen=True)
+class LLMResult:
+    text: str
+    model: str
+    input_tokens: int | None
+    output_tokens: int | None
+
+
+class LLMError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str = "unavailable",
+        stage: str = "unknown",
+        status_code: int | None = None,
+        provider_code: str | None = None,
+        reason: str | None = None,
+    ):
+        super().__init__(message)
+        self.kind = kind
+        self.stage = stage
+        self.status_code = status_code
+        self.provider_code = provider_code
+        self.reason = reason
+        self.user_message = ERROR_MESSAGES.get(kind, ERROR_MESSAGES["unavailable"])
+
+
+def _safe_identifier(value: Any) -> str | None:
+    if isinstance(value, (int, float)):
+        value = str(value)
+    return value if isinstance(value, str) and _SAFE_IDENTIFIER.fullmatch(value) else None
+
+
+def provider_error_details(exc: BaseException) -> tuple[int | None, str | None, str | None]:
+    """Return only non-sensitive diagnostics from an SDK exception."""
+
+    status = getattr(exc, "status_code", None)
+    if not isinstance(status, int):
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        return status if isinstance(status, int) else None, None, None
+    error = body.get("error", body)
+    if not isinstance(error, dict):
+        error = body
+    code = _safe_identifier(error.get("code")) or _safe_identifier(body.get("code"))
+    param = _safe_identifier(error.get("param")) or _safe_identifier(body.get("param"))
+    return status if isinstance(status, int) else None, code, param
+
+
+def unsupported_parameter(exc: BaseException, *names: str) -> bool:
+    status, code, param = provider_error_details(exc)
+    return (
+        status == 400
+        and param in set(names)
+        and code
+        in {
+            None,
+            "invalid_parameter",
+            "unknown_parameter",
+            "unsupported_parameter",
+            "unsupported_value",
+        }
+    )
+
+
+def response_failure_details(response: Any) -> tuple[str | None, str | None, str | None]:
+    status = _safe_identifier(getattr(response, "status", None))
+    error = getattr(response, "error", None)
+    incomplete = getattr(response, "incomplete_details", None)
+    code = _safe_identifier(getattr(error, "code", None))
+    reason = _safe_identifier(getattr(incomplete, "reason", None))
+    return status, code, reason
+
+
+def provider_error_kind(exc: BaseException) -> str:
+    status, _, _ = provider_error_details(exc)
+    if isinstance(exc, (APITimeoutError, TimeoutError)):
+        return "timeout"
+    if isinstance(exc, (AuthenticationError, PermissionDeniedError)):
+        return "authorization"
+    if isinstance(exc, (APIConnectionError, OSError)):
+        return "network"
+    if status in {404, 405, 501}:
+        return "incompatible"
+    return "unavailable"
+
+
+class OpenAILLMClient:
+    def __init__(self, settings: Settings, *, client: Any | None = None):
+        self.model = settings.openai_model
+        self.max_output_tokens = settings.openai_max_output_tokens
+        self.tool_mode = settings.lab2.llm_tool_mode
+        self._client = client or AsyncOpenAI(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            timeout=settings.openai_timeout,
+        )
+
+    async def generate(
+        self, *, instructions: str, messages: list[dict[str, str]], temperature: float = 0.3
+    ) -> str:
+        result = await self.generate_result(
+            instructions=instructions, messages=messages, temperature=temperature
+        )
+        return result.text
+
+    async def generate_result(
+        self, *, instructions: str, messages: list[dict[str, str]], temperature: float = 0.3
+    ) -> LLMResult:
+        request_id = uuid.uuid4().hex[:12]
+        started = time.monotonic()
+        logger.info("Начат вызов LLM: request_id=%s model=%s", request_id, self.model)
+        payload = {
+            "model": self.model,
+            "instructions": instructions,
+            "input": messages,
+            "temperature": temperature,
+            "max_output_tokens": self.max_output_tokens,
+            "store": False,
+        }
+        try:
+            try:
+                response = await self._client.responses.create(**payload)
+            except BadRequestError as exc:
+                if not unsupported_parameter(exc, "temperature"):
+                    raise
+                status, code, _ = provider_error_details(exc)
+                logger.warning(
+                    "LLM capability fallback: request_id=%s stage=generate "
+                    "feature=temperature status_code=%s provider_code=%s",
+                    request_id,
+                    status,
+                    code,
+                )
+                payload.pop("temperature")
+                response = await self._client.responses.create(**payload)
+        except (OpenAIError, TimeoutError, OSError) as exc:
+            kind = provider_error_kind(exc)
+            status_code, provider_code, _ = provider_error_details(exc)
+            logger.warning(
+                "Ошибка LLM: request_id=%s stage=generate model=%s kind=%s "
+                "error_type=%s status_code=%s provider_code=%s duration_ms=%d",
+                request_id,
+                self.model,
+                kind,
+                type(exc).__name__,
+                status_code,
+                provider_code,
+                round((time.monotonic() - started) * 1000),
+            )
+            raise LLMError(
+                "Ошибка запроса к модели.",
+                kind=kind,
+                stage="generate",
+                status_code=status_code,
+                provider_code=provider_code,
+            ) from None
+
+        status, provider_code, reason = response_failure_details(response)
+        error = getattr(response, "error", None)
+        incomplete = getattr(response, "incomplete_details", None)
+        if error or incomplete or status not in {None, "completed"}:
+            kind = "incomplete" if status == "incomplete" or incomplete else "unavailable"
+            logger.warning(
+                "Незавершённый ответ LLM: request_id=%s stage=generate model=%s kind=%s "
+                "response_status=%s provider_code=%s reason=%s duration_ms=%d",
+                request_id,
+                self.model,
+                kind,
+                status,
+                provider_code,
+                reason,
+                round((time.monotonic() - started) * 1000),
+            )
+            raise LLMError(
+                "Ответ модели не завершён.",
+                kind=kind,
+                stage="generate",
+                provider_code=provider_code,
+                reason=reason,
+            )
+        output = getattr(response, "output_text", None)
+        if not isinstance(output, str) or not output.strip():
+            logger.warning(
+                "Пустой ответ LLM: request_id=%s model=%s duration_ms=%d",
+                request_id,
+                self.model,
+                round((time.monotonic() - started) * 1000),
+            )
+            raise LLMError("Языковая модель вернула пустой ответ.", kind="empty", stage="generate")
+        logger.info(
+            "Завершён вызов LLM: request_id=%s model=%s duration_ms=%d",
+            request_id,
+            self.model,
+            round((time.monotonic() - started) * 1000),
+        )
+        usage = getattr(response, "usage", None)
+        model = getattr(response, "model", self.model)
+        return LLMResult(
+            text=output,
+            model=model if isinstance(model, str) else self.model,
+            input_tokens=getattr(usage, "input_tokens", None),
+            output_tokens=getattr(usage, "output_tokens", None),
+        )
+
+    async def close(self) -> None:
+        await self._client.close()
+
+    def _agent_adapter(self):
+        from app.llm.agent import AgentResponses
+
+        adapter = getattr(self, "_cached_agent_adapter", None)
+        if adapter is None:
+            adapter = AgentResponses(
+                self._client, self.model, self.max_output_tokens, self.tool_mode
+            )
+            self._cached_agent_adapter = adapter
+        return adapter
+
+    async def classify(self, **kwargs):
+        return await self._agent_adapter().classify(**kwargs)
+
+    async def decide(self, **kwargs):
+        return await self._agent_adapter().decide(**kwargs)

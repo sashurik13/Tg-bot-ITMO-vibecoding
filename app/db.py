@@ -4,7 +4,6 @@ from app.config import Settings
 
 
 async def create_pool(settings: Settings) -> asyncpg.Pool:
-    # Небольшого пула достаточно для учебной ВМ. Таблицы добавляют студенты.
     pool = await asyncpg.create_pool(
         host=settings.postgres_host,
         port=settings.postgres_port,
