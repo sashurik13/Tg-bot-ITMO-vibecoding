@@ -176,7 +176,7 @@ def create_server(services: MCPServices | None = None) -> Server:
 
     async def read_resource(ctx, params):
         if str(params.uri) != WEEK_URI:
-            raise MCPError(types.ErrorData(code=-32602, message=ErrorCode.INVALID_ARGUMENTS.value))
+            raise MCPError(code=-32602, message=ErrorCode.INVALID_ARGUMENTS.value)
         try:
             current: MCPServices = ctx.lifespan_context
             week = WeekResult.model_validate(await current.schedule.current_week())
@@ -190,9 +190,7 @@ def create_server(services: MCPServices | None = None) -> Server:
                 ]
             )
         except Exception:
-            raise MCPError(
-                types.ErrorData(code=-32603, message=ErrorCode.INVALID_RESULT.value)
-            ) from None
+            raise MCPError(code=-32603, message=ErrorCode.INVALID_RESULT.value) from None
 
     return Server(
         "study-assistant",

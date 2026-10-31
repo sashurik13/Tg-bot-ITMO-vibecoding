@@ -32,7 +32,7 @@ def safe_error(exc: Exception) -> AgentError:
         return AgentError(ErrorCode.TIMEOUT)
     if isinstance(exc, MCPError):
         try:
-            return AgentError(ErrorCode(exc.error.message))
+            return AgentError(ErrorCode(exc.message))
         except ValueError:
             return AgentError(ErrorCode.MCP_UNAVAILABLE)
     return AgentError(ErrorCode.MCP_UNAVAILABLE)

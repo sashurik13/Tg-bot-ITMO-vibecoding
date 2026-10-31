@@ -4,6 +4,12 @@
 !constraints.txt
 !app/
 !app/**
+!scripts/
+!scripts/**
+!migrations/
+!migrations/**
+!data/
+!data/schedule.json
 **/__pycache__/
 **/*.pyc
 **/.env*

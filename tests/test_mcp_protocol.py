@@ -5,10 +5,11 @@ from unittest.mock import AsyncMock, Mock
 import anyio
 import pytest
 from mcp import ClientSession
+from mcp.shared.exceptions import MCPError
 from mcp.shared.memory import create_client_server_memory_streams
 
 from app.agent.errors import AgentError, ErrorCode
-from app.agent.mcp_client import MCPCatalog
+from app.agent.mcp_client import MCPCatalog, safe_error
 from app.agent.mcp_contracts import WEEK_URI
 from app.agent.models import WeatherResult
 from app.agent.schedule import JsonScheduleSource, ScheduleService
@@ -125,6 +126,22 @@ async def test_week_crosses_year_and_month(services, now, start, end):
         result = await catalog.read_resource(WEEK_URI)
         assert (result["start"], result["end"]) == (start, end)
         assert len(result["days"]) == 7
+
+
+async def test_resource_errors_match_mcp_sdk_contract(services):
+    async with session_for(services) as session:
+        with pytest.raises(MCPError) as unknown:
+            await session.read_resource("schedule://unknown")
+        assert (unknown.value.code, unknown.value.message) == (-32602, "invalid_arguments")
+
+        services.schedule = Mock(
+            current_week=AsyncMock(side_effect=ValueError("private schedule data"))
+        )
+        with pytest.raises(MCPError) as failed:
+            await session.read_resource(WEEK_URI)
+        assert (failed.value.code, failed.value.message) == (-32603, "invalid_result")
+        assert safe_error(failed.value).code == ErrorCode.INVALID_RESULT
+        assert "private schedule data" not in str(failed.value)
 
 
 async def test_catalog_checks_before_transport_and_rejects_invalid_output(services):
