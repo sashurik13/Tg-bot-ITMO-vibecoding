@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from app.agent.decisions import Decision, Intent
+from app.agent.decisions import Decision
 from app.agent.errors import AgentError, ErrorCode
 from app.agent.mcp_contracts import OUTPUT_MODELS
 from app.agent.models import ARGUMENT_MODELS
@@ -43,7 +43,6 @@ def rig():
         "timezone": "Europe/Moscow",
     }
     llm = Mock(
-        classify=AsyncMock(return_value=Intent(required_tools=[], needs_clarification=False)),
         decide=AsyncMock(return_value=Decision(kind="answer", text="Ответ модели")),
     )
     mcp = Mock(list_tools=AsyncMock(return_value=tools), call_tool=AsyncMock(return_value=weather))
@@ -64,17 +63,13 @@ async def answer(rig, **kwargs):
 
 
 def choose(rig, *decisions, names=None):
-    rig.llm.classify.return_value = Intent(
-        required_tools=names or ["get_weather"],
-        needs_clarification=False,
-    )
     rig.llm.decide.side_effect = list(decisions)
 
 
 async def test_plain_answer_preserves_history_and_temperature(rig):
     assert await answer(rig) == "Ответ модели"
     rig.mcp.call_tool.assert_not_awaited()
-    request = rig.llm.classify.await_args.kwargs
+    request = rig.llm.decide.await_args.kwargs
     assert request["tools"] == rig.tools
     assert request["temperature"] == 0.7
     assert request["messages"] == [{"role": "user", "content": "private user message"}]
@@ -96,7 +91,7 @@ async def test_read_tool_is_selected_validated_and_returned_as_data(rig, name, a
     normalized = {key: value.strip() for key, value in args.items()}
     rig.mcp.call_tool.assert_awaited_once_with(name, normalized)
     first, final = [c.kwargs for c in rig.llm.decide.await_args_list]
-    assert first["required"] is True
+    assert first["required"] is False
     assert final["required"] is False
     assert final["exchanges"][0].result == rig.mcp.call_tool.return_value
     assert first["instructions"] == final["instructions"]
@@ -181,21 +176,22 @@ async def test_two_call_limit_stops_third_and_audits(rig):
     assert rig.audit.record_decision.await_args.kwargs["decision"].error == "limit_exceeded"
 
 
-async def test_current_data_answer_without_tool_is_not_accepted(rig):
-    choose(rig, Decision(kind="answer", text="Выдуманная погода +30"))
-    assert "Выдуманная" not in await answer(rig)
+async def test_current_data_requires_tool_in_model_policy(rig):
+    choose(rig, Decision(kind="answer", text="Уточните город"))
+    assert await answer(rig) == "Уточните город"
+    assert (
+        "погоду и расписание получай только из" in rig.llm.decide.await_args.kwargs["instructions"]
+    )
     rig.mcp.call_tool.assert_not_awaited()
 
 
 async def test_unavailable_mcp_preserves_conversation_and_reports_only_when_needed(rig):
     rig.agent.mcp = None
     assert await answer(rig) == "Ответ модели"
-    assert rig.llm.classify.await_args.kwargs["tools"] == []
-    rig.llm.classify.return_value = Intent(
-        required_tools=["get_weather"], needs_clarification=False
-    )
+    assert rig.llm.decide.await_args.kwargs["tools"] == []
+    rig.llm.decide.return_value = call(city="Москва")
     assert "недоступны" in await answer(rig)
-    assert rig.llm.decide.await_count == 1
+    assert rig.llm.decide.await_count == 2
     assert rig.audit.record_decision.await_args.kwargs["decision"].error == "mcp_unavailable"
 
 
@@ -302,7 +298,7 @@ async def test_handler_passes_real_history_and_owner_to_agent(rig):
         answer=AsyncMock(),
     )
     await answer_study(message, rig.llm, db, agent=rig.agent)
-    assert rig.llm.classify.await_args.kwargs["messages"] == history
+    assert rig.llm.decide.await_args.kwargs["messages"] == history
     assert rig.audit.record_decision.await_args.kwargs["owner"] == 42
     assert db.execute.await_args.args[-2:] == ("assistant", "Ответ модели")
 

@@ -64,47 +64,53 @@ async def test_native_schema_and_call_result_link_without_promoting_data():
     assert json.loads(last["input"][-1]["output"]) == {"condition": injection}
 
 
-async def test_intent_is_strict_pydantic_structured_output():
-    llm, api = client(
-        SimpleNamespace(
-            output_text='{"required_tools":["get_weather"],"needs_clarification":false}'
-        )
+async def test_native_auto_choice_uses_discovered_tools_without_classification():
+    llm, api = client(SimpleNamespace(output=[], output_text="Ответ"))
+    result = await llm.decide(
+        instructions="policy",
+        messages=[],
+        tools=TOOLS,
+        exchanges=[],
+        temperature=0.7,
+        required=False,
     )
-    result = await llm.classify(instructions="policy", messages=[], tools=TOOLS, temperature=0.7)
-    assert result.required_tools == ["get_weather"]
-    schema = api.responses.create.await_args.kwargs["text"]["format"]
-    assert schema["strict"] is True and schema["schema"]["additionalProperties"] is False
+    assert result.text == "Ответ"
+    request = api.responses.create.await_args.kwargs
+    assert request["tool_choice"] == "auto"
+    assert request["tools"][0]["name"] == "get_weather"
+    api.responses.create.assert_awaited_once()
 
 
-async def test_intent_classification_keeps_weather_context_for_city_clarification():
-    llm, api = client(
-        SimpleNamespace(
-            output_text='{"required_tools":["get_weather"],"needs_clarification":false}'
-        )
-    )
+async def test_native_choice_keeps_weather_context_for_city_clarification():
+    llm, api = client(SimpleNamespace(output=[], output_text="Ответ"))
     messages = [
         {"role": "user", "content": "Погода в Москве?"},
         {"role": "assistant", "content": "Уточни регион и страну."},
         {"role": "user", "content": "Москва, Москва, Россия"},
     ]
 
-    result = await llm.classify(
-        instructions="policy", messages=messages, tools=TOOLS, temperature=0.3
+    result = await llm.decide(
+        instructions="policy",
+        messages=messages,
+        tools=TOOLS,
+        exchanges=[],
+        temperature=0.3,
+        required=False,
     )
 
     request = api.responses.create.await_args.kwargs
-    assert result.required_tools == ["get_weather"]
+    assert result.text == "Ответ"
     assert request["input"] == messages
-    assert "используй новое уточнение целиком" in request["instructions"]
+    assert request["tool_choice"] == "auto"
 
 
 @pytest.mark.parametrize(
     "output",
     [
-        '{"required_tools":[],"needs_clarification":false,"private":"secret"}',
-        '{"required_tools":["shell"],"needs_clarification":false}',
+        '{"kind":"answer","text":"Ответ","name":null,"arguments_json":null,"private":"secret"}',
+        '{"kind":"tool","text":"","name":null,"arguments_json":"{}"}',
         'call get_weather(city="Москва")',
-        '{"required_tools":[],"needs_clarification":"false"}',
+        '{"kind":"answer","text":"","name":null,"arguments_json":null}',
     ],
 )
 async def test_invalid_structured_output_is_not_parsed_as_commands(output):
@@ -112,8 +118,9 @@ async def test_invalid_structured_output_is_not_parsed_as_commands(output):
         SimpleNamespace(output_text=output),
         SimpleNamespace(output_text=output),
     )
+    llm.tool_mode = "structured"
     with pytest.raises(LLMError) as error:
-        await llm.classify(instructions="policy", messages=[], tools=TOOLS, temperature=0.3)
+        await decide(llm)
     assert error.value.kind == "incompatible"
 
 
@@ -143,13 +150,14 @@ async def test_explicit_unsupported_native_tools_use_structured_fallback():
 
 
 async def test_unsupported_strict_schema_uses_prompted_pydantic_fallback():
-    intent = '{"required_tools":["get_weather"],"needs_clarification":false}'
+    envelope = '{"kind":"answer","text":"Ответ","name":null,"arguments_json":null}'
     llm, api = client(
         unsupported(param="text"),
-        SimpleNamespace(output_text=intent),
+        SimpleNamespace(output_text=envelope),
     )
-    result = await llm.classify(instructions="policy", messages=[], tools=TOOLS, temperature=0.3)
-    assert result.required_tools == ["get_weather"]
+    llm.tool_mode = "structured"
+    result = await decide(llm)
+    assert result.text == "Ответ"
     assert "text" not in api.responses.create.await_args.kwargs
     assert "JSON Schema" in api.responses.create.await_args.kwargs["instructions"]
 
@@ -159,21 +167,21 @@ async def test_provider_without_structured_output_is_reported_as_incompatible():
         unsupported(param="text"),
         SimpleNamespace(output_text="not json"),
     )
+    llm.tool_mode = "structured"
     with pytest.raises(LLMError) as error:
-        await llm.classify(instructions="policy", messages=[], tools=TOOLS, temperature=0.3)
+        await decide(llm)
     assert error.value.kind == "incompatible"
     assert "обязательный формат" in error.value.user_message
 
 
 async def test_unsupported_temperature_is_retried_without_parameter():
-    intent = '{"required_tools":[],"needs_clarification":false}'
+    envelope = '{"kind":"answer","text":"Ответ","name":null,"arguments_json":null}'
     llm, api = client(
         unsupported(param="temperature"),
-        SimpleNamespace(output_text=intent),
+        SimpleNamespace(output_text=envelope),
     )
-    assert not (
-        await llm.classify(instructions="policy", messages=[], tools=TOOLS, temperature=0.7)
-    ).required_tools
+    llm.tool_mode = "structured"
+    assert (await decide(llm)).text == "Ответ"
     assert "temperature" not in api.responses.create.await_args.kwargs
 
 
@@ -183,14 +191,14 @@ async def test_incomplete_agent_response_keeps_reason_and_rejects_partial_text(c
             status="incomplete",
             error=None,
             incomplete_details=SimpleNamespace(reason="max_output_tokens"),
-            output_text='{"required_tools":[]',
+            output_text='{"kind":"answer"',
         )
     )
     with pytest.raises(LLMError) as error:
-        await llm.classify(instructions="policy", messages=[], tools=TOOLS, temperature=0.3)
+        await decide(llm)
     assert (error.value.kind, error.value.stage, error.value.reason) == (
         "incomplete",
-        "classify.json_schema",
+        "decide.native",
         "max_output_tokens",
     )
     assert "max_output_tokens" in caplog.text

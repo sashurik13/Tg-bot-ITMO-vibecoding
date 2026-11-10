@@ -10,7 +10,7 @@ from aiogram.types import Message
 from pydantic import ValidationError
 
 from app.agent.capability import CapabilityAuthority
-from app.agent.decisions import Decision, Intent
+from app.agent.decisions import Decision
 from app.agent.errors import AgentError, ErrorCode
 from app.agent.models import PreparedAction, ReminderArgs, ReminderResult
 from app.agent.reminders import ReminderProposal, ReminderService, proposal_catalog
@@ -284,9 +284,6 @@ async def test_agent_projects_reminder_schema_and_prepares_only(rig):
     assert "remind_at" in tools[0]["inputSchema"]["properties"]
     rig.mcp.list_tools = AsyncMock(return_value=tools)
     llm = Mock(
-        classify=AsyncMock(
-            return_value=Intent(required_tools=["add_reminder"], needs_clarification=False)
-        ),
         decide=AsyncMock(
             return_value=Decision(
                 kind="tool",

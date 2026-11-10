@@ -6,14 +6,6 @@ from pydantic import ConfigDict, Field, model_validator
 
 from app.agent.models import Model
 
-ToolName = Literal["get_weather", "get_schedule", "add_reminder"]
-
-
-class Intent(Model):
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True, hide_input_in_errors=True)
-    required_tools: list[ToolName] = Field(max_length=3)
-    needs_clarification: bool
-
 
 class Decision(Model):
     kind: Literal["answer", "clarify", "tool"]
@@ -58,15 +50,6 @@ class ToolExchange(Model):
 
 
 class AgentLLM(Protocol):
-    async def classify(
-        self,
-        *,
-        instructions: str,
-        messages: list[dict],
-        tools: list[dict],
-        temperature: float,
-    ) -> Intent: ...
-
     async def decide(
         self,
         *,

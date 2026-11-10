@@ -257,8 +257,5 @@ class OpenAILLMClient:
             self._cached_agent_adapter = adapter
         return adapter
 
-    async def classify(self, **kwargs):
-        return await self._agent_adapter().classify(**kwargs)
-
     async def decide(self, **kwargs):
         return await self._agent_adapter().decide(**kwargs)

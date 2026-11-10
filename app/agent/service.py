@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 from app.agent.budget import CallBudget
 from app.agent.clock import Clock
-from app.agent.decisions import AgentLLM, Decision, Intent, ToolExchange
+from app.agent.decisions import AgentLLM, Decision, ToolExchange
 from app.agent.errors import AgentError, ErrorCode
 from app.agent.mcp_client import schema_validator
 from app.agent.mcp_contracts import ALLOWED_TOOLS, OUTPUT_MODELS, WeatherFailure
@@ -167,19 +167,7 @@ class ReadAgent:
                 tools = proposal_catalog(tools)
                 instructions += "\n" + await self.reminders.local_context(owner=owner)
             catalog = {tool["name"]: copy.deepcopy(tool) for tool in tools}
-            intent = Intent.model_validate(
-                await self.llm.classify(
-                    instructions=instructions,
-                    messages=copy.deepcopy(messages),
-                    tools=copy.deepcopy(tools),
-                    temperature=temperature,
-                )
-            )
-            required_names = set(intent.required_tools)
-            if required_names and not required_names.issubset(catalog):
-                raise AgentError(ErrorCode.MCP_UNAVAILABLE)
             exchanges = []
-            completed = set()
             budget = CallBudget(self.limit)
             policy = (
                 instructions + POLICY + f"\nТекущее время UTC: {self.clock.now().isoformat()}. "
@@ -187,9 +175,10 @@ class ReadAgent:
                 "Не считай его часовым поясом пользователя для напоминания."
             )
             while True:
-                missing = required_names - completed
                 offered = [
-                    tool for name, tool in catalog.items() if name in (missing or required_names)
+                    tool
+                    for name, tool in catalog.items()
+                    if not exchanges or name != "add_reminder"
                 ]
                 decision = Decision.model_validate(
                     await self.llm.decide(
@@ -198,31 +187,25 @@ class ReadAgent:
                         tools=copy.deepcopy(offered),
                         exchanges=copy.deepcopy(exchanges),
                         temperature=temperature,
-                        required=bool(missing) and not intent.needs_clarification,
+                        required=False,
                     )
                 )
                 summary = {}
                 tool_name = decision.name if decision.name in ALLOWED_TOOLS else None
                 if decision.kind != "tool":
-                    if missing:
-                        await record(action="clarify", status="rejected", reason="needs_input")
-                        return (
-                            "Уточни город для погоды, дату для расписания "
-                            "или время с часовым поясом для напоминания."
-                        )
                     await record(
                         action=decision.kind,
                         status="success",
                         reason="conversation" if not exchanges else "needs_data",
                     )
                     return decision.text
-                if decision.name not in catalog:
+                if decision.name not in ALLOWED_TOOLS:
                     raise AgentError(ErrorCode.UNKNOWN_TOOL)
-                if decision.name not in required_names:
+                if decision.name not in catalog:
+                    raise AgentError(ErrorCode.MCP_UNAVAILABLE)
+                if exchanges and decision.name == "add_reminder":
                     raise AgentError(ErrorCode.NOT_CONFIRMED)
                 if decision.name == "add_reminder" and self.reminders is not None:
-                    if intent.needs_clarification:
-                        raise AgentError(ErrorCode.INVALID_ARGUMENTS)
                     if update_id is None:
                         raise AgentError(ErrorCode.INVALID_ARGUMENTS)
                     try:
@@ -273,7 +256,6 @@ class ReadAgent:
                 if decision.name == "get_schedule" and result["date"] != payload["date"]:
                     raise AgentError(ErrorCode.INVALID_RESULT)
                 await record(action="tool", status="success", reason="needs_data")
-                completed.add(decision.name)
                 exchanges.append(ToolExchange(decision=decision, result=result))
         except WeatherFailure as exc:
             await record(

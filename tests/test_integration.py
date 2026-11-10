@@ -192,7 +192,7 @@ async def test_mcp_confirmation_transaction_and_agent_audit(database):
     from test_mcp_protocol import session_for
 
     from app.agent.capability import CAPABILITY_META_KEY, CapabilityAuthority
-    from app.agent.decisions import Decision, Intent
+    from app.agent.decisions import Decision
     from app.agent.mcp_client import MCPCatalog
     from app.agent.schedule import JsonScheduleSource, ScheduleService
     from app.agent.service import ReadAgent
@@ -250,9 +250,6 @@ async def test_mcp_confirmation_transaction_and_agent_audit(database):
             catalog = MCPCatalog(session, clock)
             await catalog.discover()
             llm = Mock(
-                classify=AsyncMock(
-                    return_value=Intent(required_tools=["get_schedule"], needs_clarification=False)
-                ),
                 decide=AsyncMock(
                     side_effect=[
                         Decision(
