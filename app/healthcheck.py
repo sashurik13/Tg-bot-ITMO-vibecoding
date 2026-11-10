@@ -1,5 +1,3 @@
-"""Проверка уже работающего приложения: python -m app.healthcheck."""
-
 import argparse
 import json
 from urllib.error import HTTPError, URLError
@@ -14,7 +12,6 @@ def main() -> int:
     args = parser.parse_args()
     try:
         settings = Settings.load(args.env_file)
-        # Системный HTTP_PROXY не должен перехватывать локальную проверку.
         with build_opener(ProxyHandler({})).open(
             f"http://127.0.0.1:{settings.health_port}/health", timeout=5
         ) as response:

@@ -1,14 +1,17 @@
 [project]
 name = "itmo-tg-template"
 version = "0.1.0"
-description = "Учебный Telegram-бот: текстовое эхо и подключение PostgreSQL"
+description = "Учебный Telegram AI-ассистент с PostgreSQL"
 requires-python = ">=3.12,<3.13"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
-markers = ["integration: tests requiring Docker and PostgreSQL"]
+markers = [
+    "integration: tests requiring Docker and PostgreSQL",
+    "mcp: opt-in tests starting a local MCP stdio subprocess",
+]
 
 [tool.ruff]
 target-version = "py312"
